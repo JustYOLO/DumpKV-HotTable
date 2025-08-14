@@ -1,0 +1,31 @@
+======================== Benchmark setup ========================
+Job ID:					
+Data directory:				/mnt/nvme0n1/mlsm/test_blob/without_gc
+WAL directory:				/mnt/nvme0n1/mlsm/test_blob/without_gc
+Output directory:			/mnt/nvme0n1/mlsm/test_blob/without_gc
+Number of threads:			1
+Compression type for SST files:		none
+Raw database size:			1099511627776
+Value size:				1024
+Number of keys:				5000000
+Duration of read-write/read-only tests:	1800
+Write buffer size:			104857600
+Blob files enabled:			1
+Blob size threshold:			0
+Blob file size:				104857600
+Compression type for blob files:	none
+Blob GC enabled:			false
+Blob GC age cutoff:			1.0
+Blob GC force threshold:		1.0
+Blob compaction readahead size:		0
+Blob file starting level:		0
+Blob cache enabled:			1
+Blob cache and block cache shared:			1
+Blob cache size:		17179869184
+Blob cache number of shard bits:		6
+Blob cache prepopulated:			0
+Target SST file size:			3276800
+Maximum size of base level:		26214400
+=================================================================
+db_bench not found
+db_bench not found
