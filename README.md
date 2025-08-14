@@ -13,16 +13,24 @@ cd ../tools && ./call_run_blob_multiple_ycsba.sh   zipfian-ycsba-default
 ```
 
 ## Paper link
-[DumpKV: Learning based lifetime aware garbage collection for key value separation in LSM-tree](https://arxiv.org/pdf/2406.01250)
+[DumpKV: Learning based lifetime aware garbage collection for key value separation in LSM-tree](https://dl.acm.org/doi/10.14778/3717755.3717778)
 Cite our paper if it's helpful to your work
 ```
-@misc{zhuang2024dumpkv,
-      title={DumpKV: Learning based lifetime aware garbage collection for key value separation in LSM-tree}, 
-      author={Zhutao Zhuang and Xinqi Zeng and Zhiguang Chen},
-      year={2024},
-      eprint={2406.01250},
-      archivePrefix={arXiv},
-      primaryClass={id='cs.DB' full_name='Databases' is_active=True alt_name=None in_archive='cs' is_general=False description='Covers database management, datamining, and data processing. Roughly includes material in ACM Subject Classes E.2, E.5, H.0, H.2, and J.1.'}
+@article{10.14778/3717755.3717778,
+author = {Zhuang, Zhutao and Zeng, Xinqi and Chen, Zhiguang},
+title = {DumpKV: Learning Based Lifetime Aware Garbage Collection for Key Value Separation in LSM-Tree},
+year = {2025},
+issue_date = {December 2024},
+publisher = {VLDB Endowment},
+volume = {18},
+number = {4},
+issn = {2150-8097},
+url = {https://doi.org/10.14778/3717755.3717778},
+doi = {10.14778/3717755.3717778},
+journal = {Proc. VLDB Endow.},
+month = may,
+pages = {1223–1236},
+numpages = {14}
 }
 ```
 
