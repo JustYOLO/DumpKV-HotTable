@@ -211,7 +211,10 @@ Status BuildTable(
         // } else {
         //   end_seq = now_seq + tboptions.db_impl->GetDefaultLifetimeThreshold();
         // }
-        end_seq = now_seq + tboptions.db_impl->GetDefaultLifetimeThreshold();
+        uint64_t default_threshold = tboptions.db_impl
+                                          ? tboptions.db_impl->GetDefaultLifetimeThreshold()
+                                          : 50000000;
+        end_seq = now_seq + default_threshold;
         blob_file_builders[i] = std::unique_ptr<BlobFileBuilder>(
             new BlobFileBuilder(
                 versions, fs, &ioptions, &mutable_cf_options, &file_options,

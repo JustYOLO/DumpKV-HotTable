@@ -475,6 +475,8 @@ void SuperVersion::Cleanup() {
     to_delete.push_back(m);
   }
   current->Unref();
+  hot_mem.reset();
+  hot_router.reset();
   cfd->UnrefAndTryDelete();
 }
 

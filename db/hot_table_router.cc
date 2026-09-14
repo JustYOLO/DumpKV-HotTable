@@ -29,11 +29,12 @@ void HotTableRouter::Rebuild(size_t capacity) {
   uint32_t total_bits = static_cast<uint32_t>(cap * bits_per_key_);
   if (total_bits < 64) total_bits = 64;
 
+  auto new_arena = std::make_unique<Arena>();
+  auto new_bloom = std::make_unique<DynamicBloom>(new_arena.get(), total_bits);
   key_count_.store(0, std::memory_order_relaxed);
-  arena_ = std::make_unique<Arena>();
-  auto new_bloom = std::make_unique<DynamicBloom>(arena_.get(), total_bits);
   bloom_.store(new_bloom.get(), std::memory_order_release);
   bloom_holder_ = std::move(new_bloom);
+  arena_ = std::move(new_arena);
 }
 
 void HotTableRouter::Disable() {
