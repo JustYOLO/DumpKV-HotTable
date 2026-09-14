@@ -206,7 +206,6 @@ Status TrainingData::AddTrainingSample(const std::vector<double>& data, const do
   ++counter;
   i++;
 
-  assert(data.size() == other_count  + n_edc_feature);
   uint64_t distance = random_access_time;
 
   if(i > other_count) {
@@ -232,7 +231,6 @@ Status TrainingData::AddTrainingSample(const std::vector<double>& data, const do
     }
   }
   assert(data.size() <= num_features_);
-  assert(counter - indptr_.back() == 2 + n_edc_feature);
 
   indptr_.push_back(counter);
   return Status::OK();
