@@ -755,8 +755,10 @@ ImmutableDBOptions::ImmutableDBOptions(const DBOptions& options)
       lowest_used_cache_tier(options.lowest_used_cache_tier),
       compaction_service(options.compaction_service),
       enforce_single_del_contracts(options.enforce_single_del_contracts),
-      num_classification(options.classification_num),
-      num_features(options.num_features),
+      num_classification(options.classification_num == 0 ? 2 : options.classification_num),
+      num_features(options.num_features == 0
+                       ? (options.max_n_past_timestamps + 2 + options.n_edc_feature)
+                       : options.num_features),
       default_lifetime_idx(options.default_lifetime_idx),
       default_lifetime(options.default_lifetime){
   fs = env->GetFileSystem();

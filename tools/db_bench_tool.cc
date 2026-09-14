@@ -4301,9 +4301,16 @@ class Benchmark {
     options.n_edc_feature = FLAGS_n_edc_feature;
 
     options.env = FLAGS_env;
-    options.model_path = FLAGS_model_path;
-    options.num_features = FLAGS_num_features;
-    options.classification_num = FLAGS_num_classes;
+    if (FLAGS_num_features > 0) {
+      options.num_features = FLAGS_num_features;
+    } else {
+      options.num_features = options.max_n_past_timestamps + 2 + options.n_edc_feature;
+    }
+    if (FLAGS_num_classes > 0) {
+      options.classification_num = FLAGS_num_classes;
+    } else {
+      options.classification_num = 2;
+    }
     options.data_file_path = FLAGS_features_data_file_path;
     options.wal_dir = FLAGS_wal_dir;
     options.dump_malloc_stats = FLAGS_dump_malloc_stats;

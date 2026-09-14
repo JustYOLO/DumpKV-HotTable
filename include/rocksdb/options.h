@@ -1406,17 +1406,17 @@ struct DBOptions {
   std::string data_file_path ;
   // = "/mnt/nvme1n1/mlsm/test_blob_no_model_mixgraph/with_gc_1.0_0.8/features1_all.csv";
 
+  uint8_t max_n_past_timestamps = 32;
+
+  uint8_t n_edc_feature = 1;
+
   uint64_t classification_num = 2; 
 
-  uint64_t num_features = max_n_past_timestamps +  2 + n_edc_feature;
+  uint64_t num_features = max_n_past_timestamps + 2 + n_edc_feature;
 
   uint64_t default_lifetime_idx = 0;
 
   uint64_t default_lifetime = 0;
-
-  uint8_t max_n_past_timestamps = 32;
-
-  uint8_t n_edc_feature = 1;
 };
 
 // Options to control the behavior of a database (passed to DB::Open)

@@ -18,8 +18,8 @@ TrainingData::TrainingData(Arena* arena,
                           uint64_t batch_size,
                            size_t num_labels)
     : arena_(arena),
-      num_features_(num_features),
-      num_labels_(num_labels),
+      num_features_(num_features == 0 ? (max_n_past_timestamps + 2 + n_edc_feature) : num_features),
+      num_labels_(num_labels == 0 ? 2 : num_labels),
       batch_size_(batch_size),
       short_label_count_(0),
       long_label_count_(0){
