@@ -59,6 +59,7 @@
 #include "rocksdb/secondary_cache.h"
 #include "rocksdb/slice.h"
 #include "util/zipf.h"
+#include "util/latest-generator.h"
 #include "rocksdb/slice_transform.h"
 #include "rocksdb/stats_history.h"
 #include "rocksdb/table.h"
@@ -129,6 +130,13 @@ DEFINE_string(
     "waitforcompaction,"
     "multireadrandom,"
     "ycsb_a,"
+    "ycsbwklda,"
+    "ycsbwkldb,"
+    "ycsbwkldc,"
+    "ycsbwkldd,"
+    "ycsbwklde,"
+    "ycsbwkldf,"
+    "ycsbwkldw,"
     "ssd_trace,"
     "mixgraph,"
     "readseq,"
@@ -832,7 +840,20 @@ DEFINE_int64(hot_table_window_seconds, 60,
              "Interval in seconds to print windowed HotTable hit rate in fillzip (0 = disabled)");
 DEFINE_int64(hot_table_window_ops, 0,
              "Interval in operations to print windowed HotTable hit rate in fillzip (0 = disabled)");
-DEFINE_double(zipf_const, 0.99, "Zipfian constant for fillzip");
+DEFINE_double(zipf_const, 0.99, "Zipfian constant for fillzip and YCSB");
+DEFINE_bool(YCSB_uniform_distribution, false,
+            "Uniform key distribution for YCSB");
+DEFINE_string(ycsb_rw_key_overlap_mode, "100",
+              "Hot key range overlap mode between reads and writes in YCSB: "
+              "\"100\" or \"full\" (100% overlap, default YCSB behavior), "
+              "\"50\" or \"half\" (50% shift of hot write keys relative to hot read keys), "
+              "\"0\" or \"disjoint\" (write hot key range is shifted by 100% of hot key range, completely disjoint from read hot keys)");
+DEFINE_double(ycsb_hot_key_ratio, 0.20,
+              "Fraction of total keyspace considered 'hot' (default 20%), used to determine "
+              "range size for YCSB write shift calculations");
+DEFINE_bool(use_zipf_for_readwrite, false,
+            "When running readrandomwriterandom, select keys from Zipfian distribution "
+            "using --zipf_const instead of uniform random");
 
 DEFINE_int64(writes, -1,
              "Number of write operations to do. If negative, do --num reads.");
@@ -3584,8 +3605,20 @@ class Benchmark {
         method = &Benchmark::ycsb_a;
       } else if (name == "ssd_trace") {
         method = &Benchmark::ssd_trace;
-      } else if (name == "fillzip") {
+      } else if (name == "fillzip" || name == "ycsbwkldw") {
         method = &Benchmark::FillZip;
+      } else if (name == "ycsbwklda") {
+        method = &Benchmark::YCSBWorkloadA;
+      } else if (name == "ycsbwkldb") {
+        method = &Benchmark::YCSBWorkloadB;
+      } else if (name == "ycsbwkldc") {
+        method = &Benchmark::YCSBWorkloadC;
+      } else if (name == "ycsbwkldd") {
+        method = &Benchmark::YCSBWorkloadD;
+      } else if (name == "ycsbwklde") {
+        method = &Benchmark::YCSBWorkloadE;
+      } else if (name == "ycsbwkldf") {
+        method = &Benchmark::YCSBWorkloadF;
       }
       else if (name == "readmissing") {
         ++key_size_;
@@ -7798,10 +7831,20 @@ class Benchmark {
       ts_guard.reset(new char[user_timestamp_size_]);
     }
 
+    if (FLAGS_use_zipf_for_readwrite) {
+      init_zipf_generator(0, FLAGS_num - 1, FLAGS_zipf_const);
+    }
+
     // the number of iterations is the larger of read_ or write_
     while (!duration.Done(1)) {
       DB* db = SelectDB(thread);
-      GenerateKeyFromInt(thread->rand.Next() % FLAGS_num, FLAGS_num, &key);
+      int64_t key_id;
+      if (FLAGS_use_zipf_for_readwrite) {
+        key_id = nextValue() % FLAGS_num;
+      } else {
+        key_id = thread->rand.Next() % FLAGS_num;
+      }
+      GenerateKeyFromInt(key_id, FLAGS_num, &key);
       if (get_weight == 0 && put_weight == 0) {
         // one batch completed, reinitialize for next batch
         get_weight = FLAGS_readwritepercent;
@@ -9019,6 +9062,368 @@ class Benchmark {
     delete backup_engine;
   }
 
+  int64_t GetYCSBWriteKey(int64_t k, int64_t num_keys) {
+    if (FLAGS_ycsb_rw_key_overlap_mode == "100" ||
+        FLAGS_ycsb_rw_key_overlap_mode == "full") {
+      return k;
+    }
+    int64_t hot_size =
+        static_cast<int64_t>(FLAGS_ycsb_hot_key_ratio * static_cast<double>(num_keys));
+    if (hot_size <= 0) {
+      hot_size = 1;
+    }
+    int64_t shift = 0;
+    if (FLAGS_ycsb_rw_key_overlap_mode == "50" ||
+        FLAGS_ycsb_rw_key_overlap_mode == "half") {
+      shift = hot_size / 2;
+    } else if (FLAGS_ycsb_rw_key_overlap_mode == "0" ||
+               FLAGS_ycsb_rw_key_overlap_mode == "none" ||
+               FLAGS_ycsb_rw_key_overlap_mode == "disjoint") {
+      shift = hot_size;
+    }
+    return (k + shift) % num_keys;
+  }
+
+  // Workload A: Update heavy workload (50/50 read/write)
+  void YCSBWorkloadA(ThreadState* thread) {
+    ReadOptions options = read_options_;
+    RandomGenerator gen;
+    init_latestgen(FLAGS_num);
+    init_zipf_generator(0, FLAGS_num, FLAGS_zipf_const);
+
+    std::string value;
+    int64_t found = 0;
+    int64_t reads_done = 0;
+    int64_t writes_done = 0;
+    int64_t nums = FLAGS_num;
+
+    std::unique_ptr<const char[]> key_guard;
+    Slice key = AllocateKey(&key_guard);
+
+    if (FLAGS_benchmark_write_rate_limit > 0) {
+      thread->shared->write_rate_limiter.reset(
+          NewGenericRateLimiter(FLAGS_benchmark_write_rate_limit));
+    }
+
+    while (nums > 0) {
+      nums--;
+      DB* db = SelectDB(thread);
+
+      long k;
+      if (FLAGS_YCSB_uniform_distribution) {
+        k = thread->rand.Next() % FLAGS_num;
+      } else {
+        k = nextValue() % FLAGS_num;
+      }
+      GenerateKeyFromInt(k, FLAGS_num, &key);
+
+      int next_op = thread->rand.Next() % 100;
+      if (next_op < 50) {
+        Status s = db->Get(options, key, &value);
+        if (s.ok()) {
+          found++;
+          thread->stats.FinishedOps(nullptr, db, 1, kRead);
+        }
+        reads_done++;
+      } else {
+        std::unique_ptr<const char[]> write_key_guard;
+        Slice write_key = AllocateKey(&write_key_guard);
+        long write_k = GetYCSBWriteKey(k, FLAGS_num);
+        GenerateKeyFromInt(write_k, FLAGS_num, &write_key);
+
+        if (FLAGS_benchmark_write_rate_limit > 0 &&
+            thread->shared->write_rate_limiter.get() != nullptr) {
+          thread->shared->write_rate_limiter->Request(
+              value_size + FLAGS_key_size, Env::IO_HIGH, nullptr /* stats */,
+              RateLimiter::OpType::kWrite);
+          thread->stats.ResetLastOpTime();
+        }
+        Status s = db->Put(write_options_, write_key, gen.Generate(value_size));
+        if (s.ok()) {
+          writes_done++;
+          thread->stats.FinishedOps(nullptr, db, 1, kWrite);
+        }
+      }
+    }
+    char msg[100];
+    snprintf(msg, sizeof(msg),
+             "( reads:%" PRIu64 " writes:%" PRIu64 " total:%" PRIu64
+             " found:%" PRIu64 " done:%" PRIu64 ")",
+             reads_done, writes_done, readwrites_, found, nums);
+    thread->stats.AddMessage(msg);
+  }
+
+  // Workload B: Read mostly workload (95/5 read/write)
+  void YCSBWorkloadB(ThreadState* thread) {
+    ReadOptions options = read_options_;
+    RandomGenerator gen;
+    init_latestgen(FLAGS_num);
+    init_zipf_generator(0, FLAGS_num, FLAGS_zipf_const);
+
+    std::string value;
+    int64_t found = 0;
+    int64_t reads_done = 0;
+    int64_t writes_done = 0;
+    int64_t nums = FLAGS_num;
+
+    std::unique_ptr<const char[]> key_guard;
+    Slice key = AllocateKey(&key_guard);
+
+    while (nums > 0) {
+      nums--;
+      DB* db = SelectDB(thread);
+
+      long k;
+      if (FLAGS_YCSB_uniform_distribution) {
+        k = thread->rand.Next() % FLAGS_num;
+      } else {
+        k = nextValue() % FLAGS_num;
+      }
+      GenerateKeyFromInt(k, FLAGS_num, &key);
+
+      int next_op = thread->rand.Next() % 100;
+      if (next_op < 95) {
+        Status s = db->Get(options, key, &value);
+        if (s.ok()) {
+          found++;
+          thread->stats.FinishedOps(nullptr, db, 1, kRead);
+        }
+        reads_done++;
+      } else {
+        std::unique_ptr<const char[]> write_key_guard;
+        Slice write_key = AllocateKey(&write_key_guard);
+        long write_k = GetYCSBWriteKey(k, FLAGS_num);
+        GenerateKeyFromInt(write_k, FLAGS_num, &write_key);
+
+        Status s = db->Put(write_options_, write_key, gen.Generate(value_size));
+        if (s.ok()) {
+          writes_done++;
+          thread->stats.FinishedOps(nullptr, db, 1, kWrite);
+        }
+      }
+    }
+    char msg[100];
+    snprintf(msg, sizeof(msg),
+             "( reads:%" PRIu64 " writes:%" PRIu64 " total:%" PRIu64
+             " found:%" PRIu64 " done:%" PRIu64 ")",
+             reads_done, writes_done, readwrites_, found, nums);
+    thread->stats.AddMessage(msg);
+  }
+
+  // Workload C: Read only workload (100% read)
+  void YCSBWorkloadC(ThreadState* thread) {
+    ReadOptions options = read_options_;
+    init_latestgen(FLAGS_num);
+    init_zipf_generator(0, FLAGS_num, FLAGS_zipf_const);
+
+    std::string value;
+    int64_t found = 0;
+    int64_t reads_done = 0;
+    int64_t nums = FLAGS_num;
+
+    std::unique_ptr<const char[]> key_guard;
+    Slice key = AllocateKey(&key_guard);
+
+    while (nums > 0) {
+      nums--;
+      DB* db = SelectDB(thread);
+
+      long k;
+      if (FLAGS_YCSB_uniform_distribution) {
+        k = thread->rand.Next() % FLAGS_num;
+      } else {
+        k = nextValue() % FLAGS_num;
+      }
+      GenerateKeyFromInt(k, FLAGS_num, &key);
+
+      Status s = db->Get(options, key, &value);
+      if (s.ok()) {
+        found++;
+        thread->stats.FinishedOps(nullptr, db, 1, kRead);
+      }
+      reads_done++;
+    }
+    char msg[100];
+    snprintf(msg, sizeof(msg),
+             "( reads:%" PRIu64 " total:%" PRIu64 " found:%" PRIu64
+             " done:%" PRIu64 ")",
+             reads_done, readwrites_, found, nums);
+    thread->stats.AddMessage(msg);
+  }
+
+  // Workload D: Read latest workload (95% read / 5% insert)
+  void YCSBWorkloadD(ThreadState* thread) {
+    ReadOptions options = read_options_;
+    RandomGenerator gen;
+    init_latestgen(FLAGS_num);
+    init_zipf_generator(0, FLAGS_num, FLAGS_zipf_const);
+
+    std::string value;
+    int64_t found = 0;
+    int64_t reads_done = 0;
+    int64_t writes_done = 0;
+    int64_t nums = FLAGS_num;
+
+    std::unique_ptr<const char[]> key_guard;
+    Slice key = AllocateKey(&key_guard);
+
+    while (nums > 0) {
+      nums--;
+      DB* db = SelectDB(thread);
+
+      long k;
+      if (FLAGS_YCSB_uniform_distribution) {
+        k = thread->rand.Next() % FLAGS_num;
+      } else {
+        k = next_value_latestgen() % FLAGS_num;
+      }
+      GenerateKeyFromInt(k, FLAGS_num, &key);
+
+      int next_op = thread->rand.Next() % 100;
+      if (next_op < 95) {
+        Status s = db->Get(options, key, &value);
+        if (s.ok()) {
+          found++;
+          thread->stats.FinishedOps(nullptr, db, 1, kRead);
+        }
+        reads_done++;
+      } else {
+        std::unique_ptr<const char[]> write_key_guard;
+        Slice write_key = AllocateKey(&write_key_guard);
+        long write_k = GetYCSBWriteKey(k, FLAGS_num);
+        GenerateKeyFromInt(write_k, FLAGS_num, &write_key);
+
+        Status s = db->Put(write_options_, write_key, gen.Generate(value_size));
+        if (s.ok()) {
+          writes_done++;
+          thread->stats.FinishedOps(nullptr, db, 1, kWrite);
+        }
+      }
+    }
+    char msg[100];
+    snprintf(msg, sizeof(msg),
+             "( reads:%" PRIu64 " writes:%" PRIu64 " total:%" PRIu64
+             " found:%" PRIu64 " done:%" PRIu64 ")",
+             reads_done, writes_done, readwrites_, found, nums);
+    thread->stats.AddMessage(msg);
+  }
+
+  // Workload E: Short range scan (95% scan / 5% insert)
+  void YCSBWorkloadE(ThreadState* thread) {
+    ReadOptions options = read_options_;
+    RandomGenerator gen;
+    init_latestgen(FLAGS_num);
+    init_zipf_generator(0, FLAGS_num, FLAGS_zipf_const);
+
+    int64_t reads_done = 0;
+    int64_t writes_done = 0;
+    int64_t nums = FLAGS_num;
+
+    std::unique_ptr<const char[]> key_guard;
+    Slice key = AllocateKey(&key_guard);
+
+    while (nums > 0) {
+      nums--;
+      DB* db = SelectDB(thread);
+
+      long k;
+      if (FLAGS_YCSB_uniform_distribution) {
+        k = thread->rand.Next() % FLAGS_num;
+      } else {
+        k = nextValue() % FLAGS_num;
+      }
+      GenerateKeyFromInt(k, FLAGS_num, &key);
+
+      int next_op = thread->rand.Next() % 100;
+      if (next_op < 95) {
+        Iterator* iter = db->NewIterator(options);
+        int64_t i = 0;
+        for (iter->Seek(key); i < 100 && iter->Valid(); iter->Next()) {
+          ++i;
+        }
+        delete iter;
+        reads_done++;
+        thread->stats.FinishedOps(nullptr, db, 1, kRead);
+      } else {
+        std::unique_ptr<const char[]> write_key_guard;
+        Slice write_key = AllocateKey(&write_key_guard);
+        long write_k = GetYCSBWriteKey(k, FLAGS_num);
+        GenerateKeyFromInt(write_k, FLAGS_num, &write_key);
+
+        Status s = db->Put(write_options_, write_key, gen.Generate(value_size));
+        if (s.ok()) {
+          writes_done++;
+          thread->stats.FinishedOps(nullptr, db, 1, kWrite);
+        }
+      }
+    }
+    char msg[100];
+    snprintf(msg, sizeof(msg),
+             "( scans:%" PRIu64 " writes:%" PRIu64 " total:%" PRIu64
+             " done:%" PRIu64 ")",
+             reads_done, writes_done, readwrites_, nums);
+    thread->stats.AddMessage(msg);
+  }
+
+  // Workload F: Read-modify-write (50/50 read/read-modify-write)
+  void YCSBWorkloadF(ThreadState* thread) {
+    ReadOptions options = read_options_;
+    RandomGenerator gen;
+    init_latestgen(FLAGS_num);
+    init_zipf_generator(0, FLAGS_num, FLAGS_zipf_const);
+
+    std::string value;
+    int64_t found = 0;
+    int64_t reads_done = 0;
+    int64_t writes_done = 0;
+    int64_t nums = FLAGS_num;
+
+    std::unique_ptr<const char[]> key_guard;
+    Slice key = AllocateKey(&key_guard);
+
+    while (nums > 0) {
+      nums--;
+      DB* db = SelectDB(thread);
+
+      long k;
+      if (FLAGS_YCSB_uniform_distribution) {
+        k = thread->rand.Next() % FLAGS_num;
+      } else {
+        k = nextValue() % FLAGS_num;
+      }
+      GenerateKeyFromInt(k, FLAGS_num, &key);
+
+      int next_op = thread->rand.Next() % 100;
+      if (next_op < 50) {
+        Status s = db->Get(options, key, &value);
+        if (s.ok()) {
+          found++;
+          thread->stats.FinishedOps(nullptr, db, 1, kRead);
+        }
+        reads_done++;
+      } else {
+        Status s = db->Get(options, key, &value);
+
+        std::unique_ptr<const char[]> write_key_guard;
+        Slice write_key = AllocateKey(&write_key_guard);
+        long write_k = GetYCSBWriteKey(k, FLAGS_num);
+        GenerateKeyFromInt(write_k, FLAGS_num, &write_key);
+
+        s = db->Put(write_options_, write_key, gen.Generate(value_size));
+        if (s.ok()) {
+          writes_done++;
+          thread->stats.FinishedOps(nullptr, db, 1, kWrite);
+        }
+      }
+    }
+    char msg[100];
+    snprintf(msg, sizeof(msg),
+             "( reads:%" PRIu64 " writes:%" PRIu64 " total:%" PRIu64
+             " found:%" PRIu64 " done:%" PRIu64 ")",
+             reads_done, writes_done, readwrites_, found, nums);
+    thread->stats.AddMessage(msg);
+  }
+
   void FillZip(ThreadState* thread) {
     RandomGenerator gen;
     int64_t key_range = FLAGS_key_range > 0 ? FLAGS_key_range : FLAGS_num;
@@ -9090,11 +9495,24 @@ class Benchmark {
       }
 
       int64_t offset = g_current_hot_offset.load(std::memory_order_relaxed);
-      long raw_zipf = nextValue();
-      long k = (raw_zipf + offset) % key_range;
-      GenerateKeyFromInt(k, key_range, &key);
+      long k;
+      if (FLAGS_YCSB_uniform_distribution) {
+        k = thread->rand.Next() % (key_range > 0 ? key_range : FLAGS_num);
+      } else {
+        long raw_zipf = nextValue();
+        k = (raw_zipf + offset) % key_range;
+      }
+      long write_k = GetYCSBWriteKey(k, key_range);
+      GenerateKeyFromInt(write_k, key_range, &key);
 
-      Status s = db->Put(write_options_, key, gen.Generate());
+      if (FLAGS_benchmark_write_rate_limit > 0 &&
+          thread->shared->write_rate_limiter.get() != nullptr) {
+        thread->shared->write_rate_limiter->Request(
+            value_size + FLAGS_key_size, Env::IO_HIGH, nullptr /* stats */,
+            RateLimiter::OpType::kWrite);
+        thread->stats.ResetLastOpTime();
+      }
+      Status s = db->Put(write_options_, key, gen.Generate(value_size));
       if (s.ok()) {
         writes_done++;
         thread->stats.FinishedOps(nullptr, db, 1, kWrite);
