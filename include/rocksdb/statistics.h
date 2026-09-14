@@ -95,6 +95,18 @@ enum Tickers : uint32_t {
   // # of memtable misses.
   MEMTABLE_MISS,
 
+  // Adaptive In-Place Hot Table tickers
+  HOT_TABLE_HIT_COUNT,
+  HOT_TABLE_WRITE_HIT_COUNT,
+  HOT_TABLE_WRITE_MISS_COUNT,
+  HOT_TABLE_READ_HIT_COUNT,
+  HOT_TABLE_READ_MISS_COUNT,
+  HOT_TABLE_ROUTER_FILTERED,
+  HOT_TABLE_ROUTER_MATCH,
+  HOT_TABLE_ROUTER_FALSE_POSITIVES,
+  HOT_TABLE_VIRTUAL_FLUSH_COUNT,
+  HOT_TABLE_PHYSICAL_FLUSH_COUNT,
+
   // # of Get() queries served by L0
   GET_HIT_L0,
   // # of Get() queries served by L1

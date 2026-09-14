@@ -8,6 +8,9 @@
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
 #include "db/column_family.h"
+#include "db/hot_memtable.h"
+#include "db/hot_table_router.h"
+#include "db/space_saving_topk.h"
 
 #include <algorithm>
 #include <cinttypes>
@@ -481,6 +484,8 @@ void SuperVersion::Init(ColumnFamilyData* new_cfd, MemTable* new_mem,
   mem = new_mem;
   imm = new_imm;
   current = new_current;
+  hot_mem = cfd->hot_mem_shared();
+  hot_router = cfd->hot_router_shared();
   cfd->Ref();
   mem->Ref();
   imm->Ref();
@@ -649,6 +654,97 @@ ColumnFamilyData::ColumnFamilyData(
               bbto->block_cache)));
     }
   }
+
+  if (ioptions_.enable_hot_table) {
+    base_write_buffer_size_ = mutable_cf_options_.write_buffer_size;
+    base_max_write_buffer_number_ = mutable_cf_options_.max_write_buffer_number;
+    hot_mem_ = std::make_shared<HotMemTable>(
+        internal_comparator_, ioptions_.hot_table_write_buffer_size,
+        ioptions_.hot_table_max_value_size);
+    size_t initial_cap = ioptions_.hot_table_write_buffer_size /
+                         (32 + ioptions_.hot_table_max_value_size);
+    if (initial_cap == 0) initial_cap = 1024;
+    hot_router_ = std::make_shared<HotTableRouter>(initial_cap);
+    hot_router_->Disable();
+    int extra_memtables = static_cast<int>(
+        ioptions_.hot_table_write_buffer_size / base_write_buffer_size_);
+    if (extra_memtables < 1) extra_memtables = 1;
+    mutable_cf_options_.max_write_buffer_number =
+        base_max_write_buffer_number_ + extra_memtables;
+    space_saving_topk_ = std::make_shared<SpaceSavingTopK>(
+        initial_cap * 2, ioptions_.hot_table_decay_factor,
+        ioptions_.hot_table_zero_hit_penalty);
+  }
+}
+
+void ColumnFamilyData::ExecuteVirtualFlush() {
+  if (!ioptions_.enable_hot_table || !hot_mem_ || !space_saving_topk_) {
+    return;
+  }
+  std::unordered_map<std::string, uint32_t> hit_map;
+  hot_mem_->SweepHits(&hit_map);
+  space_saving_topk_->ApplyDecayAndPenalties(hit_map);
+  RecordTick(ioptions_.statistics.get(), HOT_TABLE_VIRTUAL_FLUSH_COUNT);
+}
+
+void ColumnFamilyData::RebuildHotTable(bool was_physically_flushed) {
+  if (!ioptions_.enable_hot_table) {
+    return;
+  }
+  size_t capacity = ioptions_.hot_table_write_buffer_size /
+                    (32 + ioptions_.hot_table_max_value_size);
+  if (capacity == 0) capacity = 1024;
+
+  bool currently_active = (hot_router_ && hot_router_->IsActive());
+  bool is_skewed = true;
+  if (space_saving_topk_) {
+    is_skewed = space_saving_topk_->IsWorkloadSkewed(
+        currently_active,
+        ioptions_.hot_table_min_duplicate_ratio,
+        ioptions_.hot_table_min_absorption_ratio,
+        ioptions_.hot_table_consecutive_threshold_windows);
+  }
+
+  if (!is_skewed) {
+    if (hot_router_) {
+      hot_router_->Disable();
+    }
+    if (space_saving_topk_) {
+      space_saving_topk_->Clear();
+    }
+    int extra_memtables = static_cast<int>(
+        ioptions_.hot_table_write_buffer_size / base_write_buffer_size_);
+    if (extra_memtables < 1) extra_memtables = 1;
+    mutable_cf_options_.max_write_buffer_number =
+        base_max_write_buffer_number_ + extra_memtables;
+    return;
+  }
+
+  mutable_cf_options_.max_write_buffer_number = base_max_write_buffer_number_;
+
+  if (was_physically_flushed || !hot_mem_) {
+    hot_mem_ = std::make_shared<HotMemTable>(
+        internal_comparator_, ioptions_.hot_table_write_buffer_size,
+        ioptions_.hot_table_max_value_size);
+    hot_mem_->SetEarliestLogNumber(GetLogNumber());
+    if (was_physically_flushed) {
+      RecordTick(ioptions_.statistics.get(), HOT_TABLE_PHYSICAL_FLUSH_COUNT);
+    }
+  }
+
+  auto new_router = std::make_shared<HotTableRouter>(capacity);
+
+  if (space_saving_topk_) {
+    auto top_keys = space_saving_topk_->GetTopK(capacity, /*min_count=*/2);
+    for (const auto& entry : top_keys) {
+      new_router->Add(entry.key);
+    }
+    ROCKS_LOG_INFO(
+        ioptions_.info_log,
+        "[%s] [HotTable] Rebuilt hot table router with %zu hot keys (capacity: %zu)",
+        GetName().c_str(), top_keys.size(), capacity);
+  }
+  hot_router_ = std::move(new_router);
 }
 
 // DB mutex held

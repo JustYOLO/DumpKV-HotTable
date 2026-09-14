@@ -308,6 +308,16 @@ void UpdateColumnFamilyOptions(const ImmutableCFOptions& ioptions,
       ioptions.preclude_last_level_data_seconds;
   cf_opts->preserve_internal_time_seconds =
       ioptions.preserve_internal_time_seconds;
+  cf_opts->enable_hot_table = ioptions.enable_hot_table;
+  cf_opts->hot_table_write_buffer_size = ioptions.hot_table_write_buffer_size;
+  cf_opts->hot_table_max_value_size = ioptions.hot_table_max_value_size;
+  cf_opts->virtual_flush_interval_flushes = ioptions.virtual_flush_interval_flushes;
+  cf_opts->hot_table_decay_factor = ioptions.hot_table_decay_factor;
+  cf_opts->hot_table_zero_hit_penalty = ioptions.hot_table_zero_hit_penalty;
+  cf_opts->hot_table_min_duplicate_ratio = ioptions.hot_table_min_duplicate_ratio;
+  cf_opts->hot_table_min_absorption_ratio = ioptions.hot_table_min_absorption_ratio;
+  cf_opts->hot_table_consecutive_threshold_windows =
+      ioptions.hot_table_consecutive_threshold_windows;
 
   // TODO(yhchiang): find some way to handle the following derived options
   // * max_file_size

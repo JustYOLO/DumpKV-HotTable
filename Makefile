@@ -252,6 +252,7 @@ ROCKSDB_PLUGIN_TESTS = $(foreach p, $(ROCKSDB_PLUGINS), $(foreach test, $($(p)_T
 
 CXXFLAGS += $(foreach plugin, $(ROCKSDB_PLUGINS), $($(plugin)_CXXFLAGS))
 PLATFORM_LDFLAGS += $(ROCKSDB_PLUGIN_LDFLAGS)
+PLATFORM_LDFLAGS += -L/usr/local/lib -l_lightgbm
 
 # Patch up the link flags for JNI from the plugins
 JAVA_LDFLAGS += $(ROCKSDB_PLUGIN_LDFLAGS)
@@ -1526,6 +1527,9 @@ external_sst_file_test: $(OBJ_DIR)/db/external_sst_file_test.o $(TEST_LIBRARY) $
 	$(AM_LINK)
 
 import_column_family_test: $(OBJ_DIR)/db/import_column_family_test.o $(TEST_LIBRARY) $(LIBRARY)
+	$(AM_LINK)
+
+hot_memtable_test: $(OBJ_DIR)/db/hot_memtable_test.o $(TEST_LIBRARY) $(LIBRARY)
 	$(AM_LINK)
 
 db_tailing_iter_test: $(OBJ_DIR)/db/db_tailing_iter_test.o $(TEST_LIBRARY) $(LIBRARY)

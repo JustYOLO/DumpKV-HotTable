@@ -41,6 +41,9 @@ LIB_SOURCES =                                                   \
   db/compaction/compaction_outputs.cc                           \
   db/compaction/sst_partitioner.cc                              \
   db/compaction/subcompaction_state.cc                          \
+  db/compaction/garbage_collection.cc                           \
+  db/compaction/garbage_collection_job.cc                       \
+  db/compaction/garbage_collection_picker.cc                    \
   db/convenience.cc                                             \
   db/db_filesnapshot.cc                                         \
   db/db_impl/compacted_db_impl.cc                               \
@@ -64,6 +67,8 @@ LIB_SOURCES =                                                   \
   db/flush_job.cc                                               \
   db/flush_scheduler.cc                                         \
   db/forward_iterator.cc                                        \
+  db/hot_memtable.cc                                            \
+  db/hot_table_router.cc                                        \
   db/import_column_family_job.cc                                \
   db/internal_stats.cc                                          \
   db/logs_with_prep_tracker.cc                                  \
@@ -81,8 +86,10 @@ LIB_SOURCES =                                                   \
   db/repair.cc                                                  \
   db/seqno_to_time_mapping.cc                                   \
   db/snapshot_impl.cc                                           \
+  db/space_saving_topk.cc                                       \
   db/table_cache.cc                                             \
   db/table_properties_collector.cc                              \
+  db/training/training_data.cc                                  \
   db/transaction_log_impl.cc                                    \
   db/trim_history_scheduler.cc                                  \
   db/version_builder.cc                                         \
@@ -217,11 +224,15 @@ LIB_SOURCES =                                                   \
   test_util/sync_point_impl.cc                                  \
   test_util/transaction_test_util.cc                            \
   tools/dump/db_dump_tool.cc                                    \
+  tools/ldb_cmd.cc                                              \
+  tools/ldb_tool.cc                                             \
+  utilities/blob_db/blob_dump_tool.cc                           \
   trace_replay/trace_record_handler.cc                          \
   trace_replay/trace_record_result.cc                           \
   trace_replay/trace_record.cc                                  \
   trace_replay/trace_replay.cc                                  \
   trace_replay/block_cache_tracer.cc                            \
+  trace_replay/compaction_tracer.cc                             \
   trace_replay/io_tracer.cc                                     \
   util/async_file_reader.cc					\
   util/build_version.cc                                         \
@@ -248,6 +259,7 @@ LIB_SOURCES =                                                   \
   util/thread_local.cc                                          \
   util/threadpool_imp.cc                                        \
   util/xxhash.cc                                                \
+  util/zipf.cc                                                  \
   utilities/agg_merge/agg_merge.cc                              \
   utilities/backup/backup_engine.cc                             \
   utilities/blob_db/blob_compaction_filter.cc                   \
@@ -496,6 +508,7 @@ TEST_MAIN_SOURCES =                                                     \
   db/file_indexer_test.cc                                               \
   db/filename_test.cc                                                   \
   db/flush_job_test.cc                                                  \
+  db/hot_memtable_test.cc                                               \
   db/listener_test.cc                                                   \
   db/log_test.cc                                                        \
   db/manual_compaction_test.cc                                          \

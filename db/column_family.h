@@ -52,6 +52,9 @@ class InstrumentedMutexLock;
 struct SuperVersionContext;
 class BlobFileCache;
 class BlobSource;
+class HotMemTable;
+class HotTableRouter;
+class SpaceSavingTopK;
 
 extern const double kIncSlowdownRatio;
 // This file contains a list of data structures for managing column family
@@ -211,6 +214,8 @@ struct SuperVersion {
   MemTable* mem;
   MemTableListVersion* imm;
   Version* current;
+  std::shared_ptr<HotMemTable> hot_mem{nullptr};
+  std::shared_ptr<HotTableRouter> hot_router{nullptr};
   MutableCFOptions mutable_cf_options;
   // Version number of the current SuperVersion
   uint64_t version_number;
@@ -438,6 +443,22 @@ class ColumnFamilyData {
     return &int_tbl_prop_collector_factories_;
   }
 
+  HotMemTable* hot_mem() const { return hot_mem_.get(); }
+  HotTableRouter* hot_router() const { return hot_router_.get(); }
+  std::shared_ptr<HotMemTable> hot_mem_shared() const { return hot_mem_; }
+  std::shared_ptr<HotTableRouter> hot_router_shared() const { return hot_router_; }
+  SpaceSavingTopK* space_saving_topk() const { return space_saving_topk_.get(); }
+  uint32_t cold_flush_counter() const { return cold_flush_counter_; }
+  void IncrementColdFlushCounter() { cold_flush_counter_++; }
+  uint64_t last_hot_write_hits() const { return last_hot_write_hits_; }
+  uint64_t last_hot_write_misses() const { return last_hot_write_misses_; }
+  void set_last_hot_write_stats(uint64_t hits, uint64_t misses) {
+    last_hot_write_hits_ = hits;
+    last_hot_write_misses_ = misses;
+  }
+  void ExecuteVirtualFlush();
+  void RebuildHotTable(bool was_physically_flushed = true);
+
   SuperVersion* GetSuperVersion() { return super_version_; }
   // thread-safe
   // Return a already referenced SuperVersion to be used safely.
@@ -600,6 +621,14 @@ class ColumnFamilyData {
 
   MemTable* mem_;
   MemTableList imm_;
+  std::shared_ptr<HotMemTable> hot_mem_;
+  std::shared_ptr<HotTableRouter> hot_router_;
+  std::shared_ptr<SpaceSavingTopK> space_saving_topk_;
+  size_t base_write_buffer_size_{67108864};
+  int base_max_write_buffer_number_{2};
+  uint32_t cold_flush_counter_{0};
+  uint64_t last_hot_write_hits_{0};
+  uint64_t last_hot_write_misses_{0};
   SuperVersion* super_version_;
 
   // An ordinal representing the current SuperVersion. Updated by

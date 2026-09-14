@@ -48,6 +48,8 @@
 #include <vector>
 
 #include "db/column_family.h"
+#include "db/hot_memtable.h"
+#include "db/hot_table_router.h"
 #include "db/db_impl/db_impl.h"
 #include "db/dbformat.h"
 #include "db/flush_scheduler.h"
@@ -2372,6 +2374,27 @@ class MemTableInserter : public WriteBatch::Handler {
 
     MemTable* mem = cf_mems_->GetMemTable();
     auto* moptions = mem->GetImmutableMemTableOptions();
+
+    ColumnFamilyData* cfd = cf_mems_->current();
+    if (cfd && cfd->ioptions()->enable_hot_table && cfd->hot_router() &&
+        cfd->hot_router()->IsActive() && cfd->hot_mem()) {
+      if (cfd->hot_router()->MayContain(key)) {
+        RecordTick(cfd->ioptions()->statistics.get(), HOT_TABLE_ROUTER_MATCH);
+        if (cfd->hot_mem()->UpdateInPlace(key, value, value_type, sequence_) ||
+            cfd->hot_mem()->Add(key, value, value_type, sequence_)) {
+          RecordTick(cfd->ioptions()->statistics.get(), HOT_TABLE_HIT_COUNT);
+          RecordTick(cfd->ioptions()->statistics.get(), HOT_TABLE_WRITE_HIT_COUNT);
+          MaybeAdvanceSeq(false /* batch_boundary */);
+          return Status::OK();
+        } else {
+          RecordTick(cfd->ioptions()->statistics.get(), HOT_TABLE_ROUTER_FALSE_POSITIVES);
+        }
+      } else {
+        RecordTick(cfd->ioptions()->statistics.get(), HOT_TABLE_ROUTER_FILTERED);
+      }
+      RecordTick(cfd->ioptions()->statistics.get(), HOT_TABLE_WRITE_MISS_COUNT);
+    }
+
     if(sequence_ == 0) {
       fprintf(stderr, "MemtableInserter::PutCFImpl: sequence_ == 0\n");
     }
@@ -2950,6 +2973,26 @@ class MemTableInserter : public WriteBatch::Handler {
                     const ProtectionInfoKVOS64* kv_prot_info) {
     Status ret_status;
     MemTable* mem = cf_mems_->GetMemTable();
+
+    ColumnFamilyData* cfd = cf_mems_->current();
+    if (cfd && cfd->ioptions()->enable_hot_table && cfd->hot_router() &&
+        cfd->hot_router()->IsActive() && cfd->hot_mem()) {
+      if (cfd->hot_router()->MayContain(key)) {
+        RecordTick(cfd->ioptions()->statistics.get(), HOT_TABLE_ROUTER_MATCH);
+        if (cfd->hot_mem()->UpdateInPlace(key, Slice(), delete_type, sequence_) ||
+            cfd->hot_mem()->Add(key, Slice(), delete_type, sequence_)) {
+          RecordTick(cfd->ioptions()->statistics.get(), HOT_TABLE_HIT_COUNT);
+          RecordTick(cfd->ioptions()->statistics.get(), HOT_TABLE_WRITE_HIT_COUNT);
+          MaybeAdvanceSeq();
+          return Status::OK();
+        } else {
+          RecordTick(cfd->ioptions()->statistics.get(), HOT_TABLE_ROUTER_FALSE_POSITIVES);
+        }
+      } else {
+        RecordTick(cfd->ioptions()->statistics.get(), HOT_TABLE_ROUTER_FILTERED);
+      }
+      RecordTick(cfd->ioptions()->statistics.get(), HOT_TABLE_WRITE_MISS_COUNT);
+    }
     ret_status =
         mem->Add(sequence_, delete_type, key, value, kv_prot_info,
                  concurrent_memtable_writes_, get_post_process_info(mem),

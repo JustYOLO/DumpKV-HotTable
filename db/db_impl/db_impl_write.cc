@@ -18,6 +18,8 @@
 
 
 
+#include "db/column_family.h"
+#include "db/hot_memtable.h"
 #include "monitoring/file_read_sample.h"
 #include "rocksdb/utilities/ldb_cmd.h"
 #include "db/db_impl/db_impl.h"
@@ -1635,12 +1637,22 @@ Status DBImpl::PreprocessWrite(const WriteOptions& write_options,
   if (UNLIKELY(status.ok() && total_log_size_ > GetMaxTotalWalSize())) {
     assert(versions_);
     InstrumentedMutexLock l(&mutex_);
-    const ColumnFamilySet* const column_families =
+    ColumnFamilySet* const column_families =
         versions_->GetColumnFamilySet();
     assert(column_families);
     size_t num_cfs = column_families->NumberOfColumnFamilies();
     assert(num_cfs >= 1);
-    if (num_cfs > 1) {
+    bool should_switch_wal = (num_cfs > 1);
+    if (!should_switch_wal) {
+      for (auto cfd : *column_families) {
+        if (cfd->ioptions()->enable_hot_table && cfd->hot_mem() &&
+            cfd->hot_mem()->KeyCount() > 0) {
+          should_switch_wal = true;
+          break;
+        }
+      }
+    }
+    if (should_switch_wal) {
       WaitForPendingWrites();
       status = SwitchWAL(write_context);
     }

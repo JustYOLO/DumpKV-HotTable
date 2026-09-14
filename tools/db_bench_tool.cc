@@ -58,6 +58,7 @@
 #include "rocksdb/rate_limiter.h"
 #include "rocksdb/secondary_cache.h"
 #include "rocksdb/slice.h"
+#include "util/zipf.h"
 #include "rocksdb/slice_transform.h"
 #include "rocksdb/stats_history.h"
 #include "rocksdb/table.h"
@@ -811,6 +812,28 @@ DEFINE_int32(stats_level, ROCKSDB_NAMESPACE::StatsLevel::kExceptDetailedTimers,
 DEFINE_string(statistics_string, "", "Serialized statistics string");
 static class std::shared_ptr<ROCKSDB_NAMESPACE::Statistics> dbstats;
 
+static std::atomic<uint64_t> g_fillzip_ops{0};
+static std::atomic<int64_t> g_current_hot_offset{0};
+static std::atomic<uint64_t> g_current_shift_idx{0};
+static std::mutex g_shift_mutex;
+
+static std::atomic<uint64_t> g_last_window_report_micros{0};
+static std::atomic<uint64_t> g_last_window_report_op{0};
+static std::atomic<uint64_t> g_last_window_hits{0};
+static std::atomic<uint64_t> g_last_window_misses{0};
+static std::atomic<uint64_t> g_bench_start_micros{0};
+static std::mutex g_window_report_mutex;
+
+DEFINE_int64(key_range, 0,
+             "Key range for fillzip. 0 means use --num as the key range.");
+DEFINE_int64(hot_key_shift_ops, 0,
+             "Shift hot key range randomly every N operations in fillzip (0 = disabled)");
+DEFINE_int64(hot_table_window_seconds, 60,
+             "Interval in seconds to print windowed HotTable hit rate in fillzip (0 = disabled)");
+DEFINE_int64(hot_table_window_ops, 0,
+             "Interval in operations to print windowed HotTable hit rate in fillzip (0 = disabled)");
+DEFINE_double(zipf_const, 0.99, "Zipfian constant for fillzip");
+
 DEFINE_int64(writes, -1,
              "Number of write operations to do. If negative, do --num reads.");
 
@@ -1454,6 +1477,25 @@ DEFINE_bool(inplace_update_support,
 DEFINE_uint64(inplace_update_num_locks,
               ROCKSDB_NAMESPACE::Options().inplace_update_num_locks,
               "Number of RW locks to protect in-place memtable updates");
+
+DEFINE_bool(enable_hot_table, false,
+            "Enable Adaptive In-Place Hot Table architecture");
+DEFINE_uint64(hot_table_write_buffer_size, 64 * 1024 * 1024,
+              "Size of Hot Table in bytes");
+DEFINE_uint32(hot_table_max_value_size, 1024,
+              "Max value padding for in-place Hot Table nodes in bytes");
+DEFINE_uint32(virtual_flush_interval_flushes, 1,
+              "Cold flushes per Virtual Flush sweep");
+DEFINE_double(hot_table_decay_factor, 0.5,
+              "Aging decay factor for History Tracker");
+DEFINE_double(hot_table_zero_hit_penalty, 0.25,
+              "0-hit penalty factor for History Tracker");
+DEFINE_double(hot_table_min_duplicate_ratio, 0.20,
+              "Minimum duplicate ratio in cold memtable to consider workload skewed");
+DEFINE_double(hot_table_min_absorption_ratio, 0.20,
+              "Minimum write absorption ratio in HotTable to consider workload skewed");
+DEFINE_uint32(hot_table_consecutive_threshold_windows, 2,
+              "Number of consecutive flush windows required to switch HotTable state");
 
 DEFINE_bool(enable_write_thread_adaptive_yield, true,
             "Use a yielding spin loop for brief writer thread waits.");
@@ -3542,6 +3584,8 @@ class Benchmark {
         method = &Benchmark::ycsb_a;
       } else if (name == "ssd_trace") {
         method = &Benchmark::ssd_trace;
+      } else if (name == "fillzip") {
+        method = &Benchmark::FillZip;
       }
       else if (name == "readmissing") {
         ++key_size_;
@@ -3890,6 +3934,38 @@ class Benchmark {
 
     if (FLAGS_statistics) {
       fprintf(stdout, "STATISTICS:\n%s\n", dbstats->ToString().c_str());
+    }
+
+    if (dbstats) {
+      uint64_t hot_write_hit = dbstats->getTickerCount(Tickers::HOT_TABLE_WRITE_HIT_COUNT);
+      uint64_t hot_write_miss = dbstats->getTickerCount(Tickers::HOT_TABLE_WRITE_MISS_COUNT);
+      uint64_t hot_read_hit = dbstats->getTickerCount(Tickers::HOT_TABLE_READ_HIT_COUNT);
+      uint64_t hot_read_miss = dbstats->getTickerCount(Tickers::HOT_TABLE_READ_MISS_COUNT);
+      uint64_t hot_filtered = dbstats->getTickerCount(Tickers::HOT_TABLE_ROUTER_FILTERED);
+      uint64_t hot_matches = dbstats->getTickerCount(Tickers::HOT_TABLE_ROUTER_MATCH);
+      uint64_t hot_fp = dbstats->getTickerCount(Tickers::HOT_TABLE_ROUTER_FALSE_POSITIVES);
+      uint64_t vflush_cnt = dbstats->getTickerCount(Tickers::HOT_TABLE_VIRTUAL_FLUSH_COUNT);
+      uint64_t pflush_cnt = dbstats->getTickerCount(Tickers::HOT_TABLE_PHYSICAL_FLUSH_COUNT);
+
+      if (FLAGS_enable_hot_table || hot_write_hit > 0 || hot_write_miss > 0 || hot_read_hit > 0 || vflush_cnt > 0) {
+        uint64_t total_writes = hot_write_hit + hot_write_miss;
+        double write_ratio = total_writes > 0 ? (100.0 * hot_write_hit / total_writes) : 0.0;
+        uint64_t total_reads = hot_read_hit + hot_read_miss;
+        double read_ratio = total_reads > 0 ? (100.0 * hot_read_hit / total_reads) : 0.0;
+        double fp_rate = hot_matches > 0 ? (100.0 * hot_fp / hot_matches) : 0.0;
+
+        fprintf(stdout, "------------------------------------------------\n");
+        fprintf(stdout, "HOT TABLE SUMMARY:\n");
+        fprintf(stdout, "  Writes : %" PRIu64 " in-place hits, %" PRIu64 " misses (Absorption Ratio: %.2f%%)\n",
+                hot_write_hit, hot_write_miss, write_ratio);
+        fprintf(stdout, "  Reads  : %" PRIu64 " in-place hits, %" PRIu64 " misses (Read Hit Ratio: %.2f%%)\n",
+                hot_read_hit, hot_read_miss, read_ratio);
+        fprintf(stdout, "  Router : %" PRIu64 " fast-rejected, %" PRIu64 " matches, %" PRIu64 " false positives (FP Rate: %.2f%%)\n",
+                hot_filtered, hot_matches, hot_fp, fp_rate);
+        fprintf(stdout, "  Flushes: %" PRIu64 " virtual flushes (aging sweeps), %" PRIu64 " physical flushes (L0 merges)\n",
+                vflush_cnt, pflush_cnt);
+        fprintf(stdout, "------------------------------------------------\n");
+      }
     }
     if (FLAGS_simcache_size >= 0) {
       fprintf(
@@ -4608,6 +4684,16 @@ class Benchmark {
         FLAGS_experimental_mempurge_threshold;
     options.inplace_update_support = FLAGS_inplace_update_support;
     options.inplace_update_num_locks = FLAGS_inplace_update_num_locks;
+    options.enable_hot_table = FLAGS_enable_hot_table;
+    options.hot_table_write_buffer_size = FLAGS_hot_table_write_buffer_size;
+    options.hot_table_max_value_size = FLAGS_hot_table_max_value_size;
+    options.virtual_flush_interval_flushes = FLAGS_virtual_flush_interval_flushes;
+    options.hot_table_decay_factor = FLAGS_hot_table_decay_factor;
+    options.hot_table_zero_hit_penalty = FLAGS_hot_table_zero_hit_penalty;
+    options.hot_table_min_duplicate_ratio = FLAGS_hot_table_min_duplicate_ratio;
+    options.hot_table_min_absorption_ratio = FLAGS_hot_table_min_absorption_ratio;
+    options.hot_table_consecutive_threshold_windows =
+        FLAGS_hot_table_consecutive_threshold_windows;
     options.enable_write_thread_adaptive_yield =
         FLAGS_enable_write_thread_adaptive_yield;
     options.enable_pipelined_write = FLAGS_enable_pipelined_write;
@@ -8933,6 +9019,155 @@ class Benchmark {
     delete backup_engine;
   }
 
+  void FillZip(ThreadState* thread) {
+    RandomGenerator gen;
+    int64_t key_range = FLAGS_key_range > 0 ? FLAGS_key_range : FLAGS_num;
+    init_zipf_generator(0, key_range, FLAGS_zipf_const);
+
+    uint64_t now_init = FLAGS_env->NowMicros();
+    uint64_t expected_zero = 0;
+    if (g_bench_start_micros.compare_exchange_strong(expected_zero, now_init)) {
+      g_last_window_report_micros.store(now_init, std::memory_order_relaxed);
+      g_fillzip_ops.store(0, std::memory_order_relaxed);
+      g_current_hot_offset.store(0, std::memory_order_relaxed);
+      g_current_shift_idx.store(0, std::memory_order_relaxed);
+      g_last_window_hits.store(0, std::memory_order_relaxed);
+      g_last_window_misses.store(0, std::memory_order_relaxed);
+    }
+
+    int64_t writes_done = 0;
+    int64_t nums = FLAGS_num;
+
+    std::unique_ptr<const char[]> key_guard;
+    Slice key = AllocateKey(&key_guard);
+
+    while (nums > 0) {
+      nums--;
+      DB* db = SelectDB(thread);
+
+      uint64_t op_idx = g_fillzip_ops.fetch_add(1, std::memory_order_relaxed);
+
+      if (FLAGS_hot_key_shift_ops > 0 && key_range > 0) {
+        uint64_t cur_shift = op_idx / static_cast<uint64_t>(FLAGS_hot_key_shift_ops);
+        if (cur_shift != g_current_shift_idx.load(std::memory_order_relaxed)) {
+          std::lock_guard<std::mutex> lk(g_shift_mutex);
+          if (cur_shift != g_current_shift_idx.load(std::memory_order_relaxed)) {
+            Random64 r(FLAGS_seed + cur_shift * 7919 + 17);
+            int64_t new_offset = r.Next() % key_range;
+            g_current_hot_offset.store(new_offset, std::memory_order_release);
+            g_current_shift_idx.store(cur_shift, std::memory_order_release);
+
+            uint64_t cur_hits = 0;
+            uint64_t cur_misses = 0;
+            if (dbstats) {
+              cur_hits = dbstats->getTickerCount(Tickers::HOT_TABLE_WRITE_HIT_COUNT);
+              cur_misses = dbstats->getTickerCount(Tickers::HOT_TABLE_WRITE_MISS_COUNT);
+            }
+            uint64_t prev_hits = g_last_window_hits.load(std::memory_order_relaxed);
+            uint64_t prev_misses = g_last_window_misses.load(std::memory_order_relaxed);
+            uint64_t delta_hits = (cur_hits >= prev_hits) ? (cur_hits - prev_hits) : cur_hits;
+            uint64_t delta_misses = (cur_misses >= prev_misses) ? (cur_misses - prev_misses) : cur_misses;
+            uint64_t delta_total = delta_hits + delta_misses;
+            double hit_rate = (delta_total > 0) ? (delta_hits * 100.0 / delta_total) : 0.0;
+            fprintf(stderr,
+                    "\n[HotTable Pre-Shift Window] Ops: %" PRIu64
+                    " | Hit Rate before shift: %.2f%% (Hits: %" PRIu64 " / Total: %" PRIu64 ")\n",
+                    op_idx, hit_rate, delta_hits, delta_total);
+
+            g_last_window_hits.store(cur_hits, std::memory_order_relaxed);
+            g_last_window_misses.store(cur_misses, std::memory_order_relaxed);
+            g_last_window_report_micros.store(FLAGS_env->NowMicros(), std::memory_order_relaxed);
+            g_last_window_report_op.store(op_idx, std::memory_order_relaxed);
+
+            fprintf(stderr,
+                    "[db_bench] >>> Shifting hot key range (Shift #%" PRIu64
+                    " at op #%" PRIu64 ") -> New hottest key offset: %" PRId64
+                    " (key_range: 0..%" PRId64 ") <<<\n",
+                    cur_shift, op_idx, new_offset, key_range);
+            fflush(stderr);
+          }
+        }
+      }
+
+      int64_t offset = g_current_hot_offset.load(std::memory_order_relaxed);
+      long raw_zipf = nextValue();
+      long k = (raw_zipf + offset) % key_range;
+      GenerateKeyFromInt(k, key_range, &key);
+
+      Status s = db->Put(write_options_, key, gen.Generate());
+      if (s.ok()) {
+        writes_done++;
+        thread->stats.FinishedOps(nullptr, db, 1, kWrite);
+
+        bool should_report = false;
+        if (FLAGS_hot_table_window_seconds > 0) {
+          uint64_t now = FLAGS_env->NowMicros();
+          uint64_t last_rep = g_last_window_report_micros.load(std::memory_order_relaxed);
+          uint64_t window_micros = static_cast<uint64_t>(FLAGS_hot_table_window_seconds) * 1000000;
+          if (now >= last_rep + window_micros) {
+            should_report = true;
+          }
+        }
+        if (FLAGS_hot_table_window_ops > 0) {
+          uint64_t last_rep_op = g_last_window_report_op.load(std::memory_order_relaxed);
+          if (op_idx >= last_rep_op + static_cast<uint64_t>(FLAGS_hot_table_window_ops)) {
+            should_report = true;
+          }
+        }
+        if (should_report && (op_idx % 256 == 0)) {
+          if (g_window_report_mutex.try_lock()) {
+            bool still_should = false;
+            uint64_t now = FLAGS_env->NowMicros();
+            uint64_t last_rep = g_last_window_report_micros.load(std::memory_order_relaxed);
+            uint64_t window_micros = static_cast<uint64_t>(FLAGS_hot_table_window_seconds) * 1000000;
+            if (FLAGS_hot_table_window_seconds > 0 && now >= last_rep + window_micros) {
+              still_should = true;
+            }
+            uint64_t last_rep_op = g_last_window_report_op.load(std::memory_order_relaxed);
+            if (FLAGS_hot_table_window_ops > 0 && op_idx >= last_rep_op + static_cast<uint64_t>(FLAGS_hot_table_window_ops)) {
+              still_should = true;
+            }
+            if (still_should) {
+              uint64_t cur_hits = 0;
+              uint64_t cur_misses = 0;
+              if (dbstats) {
+                cur_hits = dbstats->getTickerCount(Tickers::HOT_TABLE_WRITE_HIT_COUNT);
+                cur_misses = dbstats->getTickerCount(Tickers::HOT_TABLE_WRITE_MISS_COUNT);
+              }
+              uint64_t prev_hits = g_last_window_hits.load(std::memory_order_relaxed);
+              uint64_t prev_misses = g_last_window_misses.load(std::memory_order_relaxed);
+              uint64_t delta_hits = (cur_hits >= prev_hits) ? (cur_hits - prev_hits) : cur_hits;
+              uint64_t delta_misses = (cur_misses >= prev_misses) ? (cur_misses - prev_misses) : cur_misses;
+              uint64_t delta_total = delta_hits + delta_misses;
+              double hit_rate = (delta_total > 0) ? (delta_hits * 100.0 / delta_total) : 0.0;
+              double elapsed_sec = (now - g_bench_start_micros.load(std::memory_order_relaxed)) / 1000000.0;
+
+              fprintf(stderr,
+                      "[HotTable Window] Elapsed: %.1fs | Ops: %" PRIu64
+                      " | Shift: #%" PRIu64 " (Hot Offset: %" PRId64
+                      ") | Window Hit Rate: %.2f%% (Hits: %" PRIu64 " / Total: %" PRIu64 ")\n",
+                      elapsed_sec, op_idx,
+                      g_current_shift_idx.load(std::memory_order_relaxed),
+                      g_current_hot_offset.load(std::memory_order_relaxed),
+                      hit_rate, delta_hits, delta_total);
+              fflush(stderr);
+
+              g_last_window_hits.store(cur_hits, std::memory_order_relaxed);
+              g_last_window_misses.store(cur_misses, std::memory_order_relaxed);
+              g_last_window_report_micros.store(now, std::memory_order_relaxed);
+              g_last_window_report_op.store(op_idx, std::memory_order_relaxed);
+            }
+            g_window_report_mutex.unlock();
+          }
+        }
+      }
+    }
+    char msg[100];
+    snprintf(msg, sizeof(msg), "( writes:%" PRIu64 " done:%" PRIu64 ")",
+             writes_done, writes_done);
+    thread->stats.AddMessage(msg);
+  }
+
 };
 
 int db_bench_tool(int argc, char** argv) {
@@ -8963,8 +9198,11 @@ int db_bench_tool(int argc, char** argv) {
       exit(1);
     }
   }
-  if (FLAGS_statistics) {
-    dbstats = ROCKSDB_NAMESPACE::CreateDBStatistics();
+  if (FLAGS_statistics || FLAGS_enable_hot_table || FLAGS_hot_table_window_seconds > 0 ||
+      FLAGS_hot_table_window_ops > 0) {
+    if (!dbstats) {
+      dbstats = ROCKSDB_NAMESPACE::CreateDBStatistics();
+    }
   }
   if (dbstats) {
     dbstats->set_stats_level(static_cast<StatsLevel>(FLAGS_stats_level));

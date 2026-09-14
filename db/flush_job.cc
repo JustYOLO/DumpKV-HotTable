@@ -17,8 +17,12 @@
 #include "db/db_iter.h"
 #include "db/dbformat.h"
 #include "db/event_helpers.h"
+#include "db/hot_memtable.h"
+#include "db/hot_table_router.h"
 #include "db/log_reader.h"
 #include "db/log_writer.h"
+#include "db/space_saving_topk.h"
+#include "db/write_controller.h"
 #include "db/memtable.h"
 #include "db/memtable_list.h"
 #include "db/merge_context.h"
@@ -250,6 +254,12 @@ Status FlushJob::Run(LogsWithPrepTracker* prep_tracker, FileMetaData* file_meta,
       mutable_cf_options_.experimental_mempurge_threshold;
 
   AutoThreadOperationStageUpdater stage_run(ThreadStatus::STAGE_FLUSH_RUN);
+  if (cfd_->ioptions()->enable_hot_table) {
+    cfd_->IncrementColdFlushCounter();
+    if (cfd_->cold_flush_counter() % cfd_->ioptions()->virtual_flush_interval_flushes == 0) {
+      cfd_->ExecuteVirtualFlush();
+    }
+  }
   if (mems_.empty()) {
     ROCKS_LOG_BUFFER(log_buffer_, "[%s] Nothing in memtable to flush",
                      cfd_->GetName().c_str());
@@ -892,6 +902,29 @@ Status FlushJob::WriteLevel0Table() {
   const uint64_t start_micros = clock_->NowMicros();
   const uint64_t start_cpu_micros = clock_->CPUMicros();
   Status s;
+  bool flush_hot_table = false;
+  if (cfd_->ioptions()->enable_hot_table && cfd_->hot_mem()) {
+    if (cfd_->hot_mem()->IsFull() || flush_reason_ == FlushReason::kWalFull ||
+        flush_reason_ == FlushReason::kShutDown || flush_reason_ == FlushReason::kManualFlush) {
+      flush_hot_table = true;
+    }
+  }
+
+  std::unique_ptr<WriteControllerToken> hot_stall_token;
+  uint64_t hot_flush_stall_start_micros = 0;
+  if (flush_hot_table && versions_ && versions_->GetColumnFamilySet()) {
+    WriteController* write_controller =
+        versions_->GetColumnFamilySet()->write_controller();
+    if (write_controller) {
+      hot_stall_token = write_controller->GetStopToken();
+      hot_flush_stall_start_micros = clock_->NowMicros();
+      cfd_->internal_stats()->AddCFStats(InternalStats::MEMTABLE_LIMIT_STOPS, 1);
+      ROCKS_LOG_WARN(
+          db_options_.info_log,
+          "[%s] [JOB %d] Initiating Write Stall for HotTable physical flush",
+          cfd_->GetName().c_str(), job_context_->job_id);
+    }
+  }
 
   SequenceNumber smallest_seqno = mems_.front()->GetEarliestSequenceNumber();
   if (!db_impl_seqno_time_mapping_.Empty()) {
@@ -944,6 +977,89 @@ Status FlushJob::WriteLevel0Table() {
       total_num_deletes += m->num_deletes();
       total_data_size += m->get_data_size();
       total_memory_usage += m->ApproximateMemoryUsage();
+    }
+
+    // Identify and record keys in the flushed cold memtable(s) that appeared >= 2 times
+    if (cfd_->ioptions()->enable_hot_table && cfd_->space_saving_topk()) {
+      uint64_t total_duplicate_entries = 0;
+      for (MemTable* m : mems_) {
+        InternalIterator* scan_it = m->NewIterator(ro, &arena);
+        std::string prev_user_key;
+        uint64_t dup_count = 0;
+
+        for (scan_it->SeekToFirst(); scan_it->Valid(); scan_it->Next()) {
+          ParsedInternalKey pikey;
+          if (ParseInternalKey(scan_it->key(), &pikey, false /* log_err_key */).ok()) {
+            if (dup_count > 0 && pikey.user_key == prev_user_key) {
+              dup_count++;
+            } else {
+              if (dup_count >= 2) {
+                cfd_->space_saving_topk()->Update(prev_user_key, dup_count);
+                total_duplicate_entries += dup_count;
+              }
+              prev_user_key = pikey.user_key.ToString();
+              dup_count = 1;
+            }
+          }
+        }
+        if (dup_count >= 2) {
+          cfd_->space_saving_topk()->Update(prev_user_key, dup_count);
+          total_duplicate_entries += dup_count;
+        }
+      }
+      uint64_t cur_hits = 0;
+      uint64_t cur_misses = 0;
+      if (stats_) {
+        cur_hits = stats_->getTickerCount(HOT_TABLE_WRITE_HIT_COUNT);
+        cur_misses = stats_->getTickerCount(HOT_TABLE_WRITE_MISS_COUNT);
+      }
+      uint64_t delta_hits = (cur_hits >= cfd_->last_hot_write_hits()) ? (cur_hits - cfd_->last_hot_write_hits()) : cur_hits;
+      uint64_t delta_misses = (cur_misses >= cfd_->last_hot_write_misses()) ? (cur_misses - cfd_->last_hot_write_misses()) : cur_misses;
+      cfd_->set_last_hot_write_stats(cur_hits, cur_misses);
+
+      cfd_->space_saving_topk()->RecordFlushWindow(total_num_entries, total_duplicate_entries,
+                                                  delta_hits, delta_misses);
+
+      // Detect hot key range shift: HotTable absorption collapsed while memtable duplicate/garbage ratio is high
+      if (!flush_hot_table && cfd_->hot_mem() && cfd_->hot_mem()->KeyCount() > 0) {
+        double cur_abs = cfd_->space_saving_topk()->GetRecentAbsorptionRatio();
+        double cur_dup = cfd_->space_saving_topk()->GetRecentDuplicateRatio();
+        if (cur_abs < cfd_->ioptions()->hot_table_min_absorption_ratio &&
+            cur_dup >= cfd_->ioptions()->hot_table_min_duplicate_ratio) {
+          flush_hot_table = true;
+          if (!hot_stall_token && versions_ && versions_->GetColumnFamilySet()) {
+            WriteController* write_controller =
+                versions_->GetColumnFamilySet()->write_controller();
+            if (write_controller) {
+              hot_stall_token = write_controller->GetStopToken();
+              hot_flush_stall_start_micros = clock_->NowMicros();
+              cfd_->internal_stats()->AddCFStats(InternalStats::MEMTABLE_LIMIT_STOPS, 1);
+              ROCKS_LOG_WARN(
+                  db_options_.info_log,
+                  "[%s] [JOB %d] Initiating Write Stall for HotTable physical flush",
+                  cfd_->GetName().c_str(), job_context_->job_id);
+            }
+          }
+          ROCKS_LOG_INFO(
+              db_options_.info_log,
+              "[%s] [HotTable] Detected hot key range shift: absorption dropped to %.2f%% (< %.1f%%), "
+              "while memtable duplicate/garbage ratio is %.2f%% (>= %.1f%%). "
+              "Flushing stale hot table and rebuilding with new hot keys.",
+              cfd_->GetName().c_str(),
+              cur_abs * 100.0,
+              cfd_->ioptions()->hot_table_min_absorption_ratio * 100.0,
+              cur_dup * 100.0,
+              cfd_->ioptions()->hot_table_min_duplicate_ratio * 100.0);
+        }
+      }
+    }
+
+    if (flush_hot_table) {
+      size_t hot_key_count = 0;
+      memtables.push_back(cfd_->hot_mem()->NewIterator(&arena, &hot_key_count));
+      total_num_entries += hot_key_count;
+      total_data_size += cfd_->hot_mem()->ApproximateMemoryUsage();
+      total_memory_usage += cfd_->hot_mem()->ApproximateMemoryUsage();
     }
 
     event_logger_->Log() << "job" << job_context_->job_id << "event"
@@ -1145,6 +1261,25 @@ Status FlushJob::WriteLevel0Table() {
       InternalStats::BYTES_FLUSHED,
       stats.bytes_written + stats.bytes_written_blob);
   RecordFlushIOStats();
+
+  if (s.ok()) {
+    if (cfd_->ioptions()->enable_hot_table && cfd_->hot_router()) {
+      cfd_->RebuildHotTable(flush_hot_table);
+    }
+  }
+
+  if (hot_stall_token) {
+    uint64_t stall_micros = clock_->NowMicros() - hot_flush_stall_start_micros;
+    hot_stall_token.reset();
+    RecordTick(stats_, STALL_MICROS, stall_micros);
+    RecordInHistogram(stats_, WRITE_STALL, stall_micros);
+    cfd_->internal_stats()->AddDBStats(
+        InternalStats::kIntStatsWriteStallMicros, stall_micros);
+    ROCKS_LOG_INFO(
+        db_options_.info_log,
+        "[%s] [JOB %d] HotTable physical flush completed; Write Stall ended (%" PRIu64 " micros)",
+        cfd_->GetName().c_str(), job_context_->job_id, stall_micros);
+  }
 
   return s;
 }

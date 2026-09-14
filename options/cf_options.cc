@@ -774,6 +774,43 @@ static std::unordered_map<std::string, OptionTypeInfo>
             auto* cache = static_cast<std::shared_ptr<Cache>*>(addr);
             return Cache::CreateFromString(opts, value, cache);
           }}},
+        {"enable_hot_table",
+         {offsetof(struct ImmutableCFOptions, enable_hot_table),
+          OptionType::kBoolean, OptionVerificationType::kNormal,
+          OptionTypeFlags::kNone}},
+        {"hot_table_write_buffer_size",
+         {offsetof(struct ImmutableCFOptions, hot_table_write_buffer_size),
+          OptionType::kSizeT, OptionVerificationType::kNormal,
+          OptionTypeFlags::kNone}},
+        {"hot_table_max_value_size",
+         {offsetof(struct ImmutableCFOptions, hot_table_max_value_size),
+          OptionType::kUInt32T, OptionVerificationType::kNormal,
+          OptionTypeFlags::kNone}},
+        {"virtual_flush_interval_flushes",
+         {offsetof(struct ImmutableCFOptions, virtual_flush_interval_flushes),
+          OptionType::kUInt32T, OptionVerificationType::kNormal,
+          OptionTypeFlags::kNone}},
+        {"hot_table_decay_factor",
+         {offsetof(struct ImmutableCFOptions, hot_table_decay_factor),
+          OptionType::kDouble, OptionVerificationType::kNormal,
+          OptionTypeFlags::kNone}},
+        {"hot_table_zero_hit_penalty",
+         {offsetof(struct ImmutableCFOptions, hot_table_zero_hit_penalty),
+          OptionType::kDouble, OptionVerificationType::kNormal,
+          OptionTypeFlags::kNone}},
+        {"hot_table_min_duplicate_ratio",
+         {offsetof(struct ImmutableCFOptions, hot_table_min_duplicate_ratio),
+          OptionType::kDouble, OptionVerificationType::kNormal,
+          OptionTypeFlags::kNone}},
+        {"hot_table_min_absorption_ratio",
+         {offsetof(struct ImmutableCFOptions, hot_table_min_absorption_ratio),
+          OptionType::kDouble, OptionVerificationType::kNormal,
+          OptionTypeFlags::kNone}},
+        {"hot_table_consecutive_threshold_windows",
+         {offsetof(struct ImmutableCFOptions,
+                   hot_table_consecutive_threshold_windows),
+          OptionType::kUInt32T, OptionVerificationType::kNormal,
+          OptionTypeFlags::kNone}},
 };
 
 const std::string OptionsHelper::kCFOptionsName = "ColumnFamilyOptions";
@@ -917,7 +954,17 @@ ImmutableCFOptions::ImmutableCFOptions(const ColumnFamilyOptions& cf_options)
       cf_paths(cf_options.cf_paths),
       compaction_thread_limiter(cf_options.compaction_thread_limiter),
       sst_partitioner_factory(cf_options.sst_partitioner_factory),
-      blob_cache(cf_options.blob_cache) {}
+      blob_cache(cf_options.blob_cache),
+      enable_hot_table(cf_options.enable_hot_table),
+      hot_table_write_buffer_size(cf_options.hot_table_write_buffer_size),
+      hot_table_max_value_size(cf_options.hot_table_max_value_size),
+      virtual_flush_interval_flushes(cf_options.virtual_flush_interval_flushes),
+      hot_table_decay_factor(cf_options.hot_table_decay_factor),
+      hot_table_zero_hit_penalty(cf_options.hot_table_zero_hit_penalty),
+      hot_table_min_duplicate_ratio(cf_options.hot_table_min_duplicate_ratio),
+      hot_table_min_absorption_ratio(cf_options.hot_table_min_absorption_ratio),
+      hot_table_consecutive_threshold_windows(
+          cf_options.hot_table_consecutive_threshold_windows) {}
 
 ImmutableOptions::ImmutableOptions() : ImmutableOptions(Options()) {}
 
