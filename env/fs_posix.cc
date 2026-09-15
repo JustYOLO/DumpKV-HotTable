@@ -229,9 +229,17 @@ class PosixFileSystem : public FileSystem {
       IOSTATS_TIMER_GUARD(open_nanos);
       fd = open(fname.c_str(), flags, GetDBFileMode(allow_non_owner_access_));
     } while (fd < 0 && errno == EINTR);
+    if (fd < 0 && (flags & O_DIRECT) && (errno == EINVAL || errno == EOPNOTSUPP)) {
+      flags &= ~O_DIRECT;
+      do {
+        IOSTATS_TIMER_GUARD(open_nanos);
+        fd = open(fname.c_str(), flags, GetDBFileMode(allow_non_owner_access_));
+      } while (fd < 0 && errno == EINTR);
+    }
     if (fd < 0) {
       s = IOError("While open a file for random read", fname, errno);
-      assert(false);
+      fprintf(stderr, "[PosixFileSystem] NewRandomAccessFile failed: file='%s', errno=%d (%s)\n",
+              fname.c_str(), errno, strerror(errno));
       return s;
     }
     SetFD_CLOEXEC(fd, &options);
@@ -314,7 +322,8 @@ class PosixFileSystem : public FileSystem {
 
     if (fd < 0) {
       s = IOError("While open a file for appending", fname, errno);
-      assert(false);
+      fprintf(stderr, "[PosixFileSystem] NewWritableFile failed: file='%s', errno=%d (%s)\n",
+              fname.c_str(), errno, strerror(errno));
       return s;
     }
     SetFD_CLOEXEC(fd, &options);
