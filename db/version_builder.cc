@@ -179,10 +179,7 @@ class VersionBuilder::Rep {
 
     explicit MutableBlobFileMetaData(
         const std::shared_ptr<SharedBlobFileMetaData>& shared_meta)
-        : shared_meta_(shared_meta) {
-      assert(shared_meta_->GetCreationTimestamp() > 0);
-      assert(shared_meta_->GetEndingTimestamp() > 0);
-    }
+        : shared_meta_(shared_meta) {}
 
     // To be used for pre-existing blob files
     explicit MutableBlobFileMetaData(
@@ -190,10 +187,7 @@ class VersionBuilder::Rep {
         : shared_meta_(meta->GetSharedMeta()),
           linked_ssts_(meta->GetLinkedSsts()),
           garbage_blob_count_(meta->GetGarbageBlobCount()),
-          garbage_blob_bytes_(meta->GetGarbageBlobBytes()) {
-      assert(shared_meta_->GetCreationTimestamp() > 0);
-      assert(shared_meta_->GetEndingTimestamp() > 0);
-    }
+          garbage_blob_bytes_(meta->GetGarbageBlobBytes()) {}
 
     const std::shared_ptr<SharedBlobFileMetaData>& GetSharedMeta() const {
       return shared_meta_;
@@ -706,6 +700,9 @@ class VersionBuilder::Rep {
                        .emplace(blob_file_number, mutable_file_meta_data )
                        .first;
         uint64_t blob_lifetime_label = meta->GetLifetimeLabel();
+        if (blob_lifetime_label >= lifetime_mutable_blob_file_metas_.size()) {
+          blob_lifetime_label = 0;
+        }
         lifetime_mutable_blob_file_metas_[blob_lifetime_label].emplace(
             blob_file_number,  mutable_file_meta_data);
       return mutable_it->second.get();
@@ -767,7 +764,18 @@ class VersionBuilder::Rep {
 
   Status ApplyBlobFileAddition(const BlobFileAddition& blob_file_addition) {
     const uint64_t blob_file_number = blob_file_addition.GetBlobFileNumber();
-    const uint64_t lifetime_label = blob_file_addition.GetLifetimeLabel();
+    uint64_t lifetime_label = blob_file_addition.GetLifetimeLabel();
+    if (lifetime_label >= lifetime_mutable_blob_file_metas_.size()) {
+      lifetime_label = 0;
+    }
+    uint64_t creation_timestamp = blob_file_addition.GetCreationTimestamp();
+    if (creation_timestamp == 0) {
+      creation_timestamp = 1;
+    }
+    uint64_t ending_timestamp = blob_file_addition.GetEndingTimestamp();
+    if (ending_timestamp == 0) {
+      ending_timestamp = creation_timestamp;
+    }
 
     if (IsBlobFileInVersionWithLifetime(blob_file_number, lifetime_label)) {
       std::ostringstream oss;
@@ -810,9 +818,9 @@ class VersionBuilder::Rep {
         blob_file_addition.GetTotalBlobBytes(),
         blob_file_addition.GetChecksumMethod(),
         blob_file_addition.GetChecksumValue(), deleter,
-        blob_file_addition.GetLifetimeLabel(),
-        blob_file_addition.GetCreationTimestamp(),
-        blob_file_addition.GetEndingTimestamp());
+        lifetime_label,
+        creation_timestamp,
+        ending_timestamp);
 
     // auto shared_mutable_blob_file_metadata = 
     // const auto shared_meta_const = shared_meta;
@@ -925,46 +933,40 @@ class VersionBuilder::Rep {
 
       return Status::OK();
     }
-    const FileMetaData* const meta =
-        base_vstorage_->GetFileMetaDataByNumber(file_number);
-    for(auto blob_file_num: meta->linked_blob_files) {
-      if(blob_file_num != kInvalidBlobFileNumber) {
+
+    auto& level_state = levels_[level];
+    auto& add_files = level_state.added_files;
+    auto add_it = add_files.find(file_number);
+
+    const FileMetaData* meta = nullptr;
+    if (add_it != add_files.end()) {
+      meta = add_it->second;
+    } else if (base_vstorage_) {
+      meta = base_vstorage_->GetFileMetaDataByNumber(file_number);
+    }
+
+    if (meta) {
+      for (auto blob_file_num : meta->linked_blob_files) {
+        if (blob_file_num != kInvalidBlobFileNumber) {
+          MutableBlobFileMetaData* const mutable_meta =
+              GetOrCreateMutableBlobFileMetaData(blob_file_num);
+          if (mutable_meta) {
+            mutable_meta->UnlinkSst(file_number);
+          }
+        }
+      }
+    } else {
+      const uint64_t blob_file_number =
+          GetOldestBlobFileNumberForTableFile(level, file_number);
+      if (blob_file_number != kInvalidBlobFileNumber) {
         MutableBlobFileMetaData* const mutable_meta =
-            GetOrCreateMutableBlobFileMetaData(blob_file_num);
+            GetOrCreateMutableBlobFileMetaData(blob_file_number);
         if (mutable_meta) {
           mutable_meta->UnlinkSst(file_number);
         }
-
       }
-
-    const uint64_t blob_file_number =
-        GetOldestBlobFileNumberForTableFile(level, file_number);
-      if(blob_file_number != kInvalidBlobFileNumber) {
-        if(meta->linked_blob_files.find(blob_file_number) == meta->linked_blob_files.end()) {
-          assert(false);
-        }
-      }
-
     }
 
-
-    // const uint64_t blob_file_number =
-    //     GetOldestBlobFileNumberForTableFile(level, file_number);
-
-    // if (blob_file_number != kInvalidBlobFileNumber) {
-    //   MutableBlobFileMetaData* const mutable_meta =
-    //       GetOrCreateMutableBlobFileMetaData(blob_file_number);
-    //   if (mutable_meta) {
-    //     mutable_meta->UnlinkSst(file_number);
-    //   }
-    // }
-
-
-
-    auto& level_state = levels_[level];
-
-    auto& add_files = level_state.added_files;
-    auto add_it = add_files.find(file_number);
     if (add_it != add_files.end()) {
       UnrefFile(add_it->second);
       add_files.erase(add_it);

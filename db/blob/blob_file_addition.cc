@@ -22,6 +22,9 @@ enum BlobFileAddition::CustomFieldTags : uint32_t {
   kEndMarker,
 
   // Add forward compatible fields here
+  kLifetimeLabel = 1,
+  kBuildTimestamp = 2,
+  kEndingTimestamp = 3,
 
   /////////////////////////////////////////////////////////////////////
 
@@ -47,6 +50,25 @@ void BlobFileAddition::EncodeTo(std::string* output) const {
   // CustomFieldTags above) followed by a length prefixed slice. Unknown custom
   // fields will be ignored during decoding unless they're in the forward
   // incompatible range.
+  // Custom fields
+  if (lifetime_label_ >= 0) {
+    PutVarint32(output, kLifetimeLabel);
+    std::string val;
+    PutVarint64(&val, static_cast<uint64_t>(lifetime_label_));
+    PutLengthPrefixedSlice(output, val);
+  }
+  if (build_timestamp_ > 0) {
+    PutVarint32(output, kBuildTimestamp);
+    std::string val;
+    PutVarint64(&val, build_timestamp_);
+    PutLengthPrefixedSlice(output, val);
+  }
+  if (ending_timestamp_ > 0) {
+    PutVarint32(output, kEndingTimestamp);
+    std::string val;
+    PutVarint64(&val, ending_timestamp_);
+    PutLengthPrefixedSlice(output, val);
+  }
 
   TEST_SYNC_POINT_CALLBACK("BlobFileAddition::EncodeTo::CustomFields", output);
 
@@ -99,6 +121,17 @@ Status BlobFileAddition::DecodeFrom(Slice* input) {
     if (!GetLengthPrefixedSlice(input, &custom_field_value)) {
       return Status::Corruption(class_name,
                                 "Error decoding custom field value");
+    }
+
+    if (custom_field_tag == kLifetimeLabel) {
+      uint64_t label = 0;
+      if (GetVarint64(&custom_field_value, &label)) {
+        lifetime_label_ = static_cast<int>(label);
+      }
+    } else if (custom_field_tag == kBuildTimestamp) {
+      GetVarint64(&custom_field_value, &build_timestamp_);
+    } else if (custom_field_tag == kEndingTimestamp) {
+      GetVarint64(&custom_field_value, &ending_timestamp_);
     }
   }
 

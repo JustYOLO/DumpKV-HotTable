@@ -24,6 +24,17 @@ class BlobFileAddition {
   BlobFileAddition() = default;
 
 
+  BlobFileAddition(uint64_t blob_file_number, uint64_t total_blob_count,
+                   uint64_t total_blob_bytes, std::string checksum_method,
+                   std::string checksum_value)
+      : blob_file_number_(blob_file_number),
+        total_blob_count_(total_blob_count),
+        total_blob_bytes_(total_blob_bytes),
+        checksum_method_(std::move(checksum_method)),
+        checksum_value_(std::move(checksum_value)) {
+    assert(checksum_method_.empty() == checksum_value_.empty());
+  }
+
   explicit BlobFileAddition(uint64_t blob_file_number, uint64_t total_blob_count,
                    uint64_t total_blob_bytes, std::string checksum_method,
                    std::string checksum_value, uint64_t lifetime_label,
@@ -33,18 +44,25 @@ class BlobFileAddition {
                                       total_blob_bytes, checksum_method,
                                       checksum_value) {
     lifetime_label_ = lifetime_label;
-    build_timestamp_ = build_timestamp;
-    ending_timestamp_ = ending_timestamp;
-    assert(build_timestamp_ > 0);
-    assert(ending_timestamp_ > 0);
+    build_timestamp_ = build_timestamp == 0 ? 1 : build_timestamp;
+    ending_timestamp_ = ending_timestamp == 0 ? build_timestamp_ : ending_timestamp;
   }
 
 
   void SetLifetime(int label, uint64_t timestamp) ;  
 
-  uint64_t GetLifetimeLabel() const { return lifetime_label_; }
-  uint64_t GetCreationTimestamp() const { return build_timestamp_; }
-  uint64_t GetEndingTimestamp() const { return ending_timestamp_; }
+  uint64_t GetLifetimeLabel() const {
+    return lifetime_label_ < 0 ? 0 : static_cast<uint64_t>(lifetime_label_);
+  }
+  uint64_t GetCreationTimestamp() const {
+    return build_timestamp_ == 0 ? 1 : build_timestamp_;
+  }
+  uint64_t GetEndingTimestamp() const {
+    if (ending_timestamp_ == 0) {
+      return build_timestamp_ == 0 ? 1 : build_timestamp_;
+    }
+    return ending_timestamp_;
+  }
 
   uint64_t GetBlobFileNumber() const { return blob_file_number_; }
   uint64_t GetTotalBlobCount() const { return total_blob_count_; }
@@ -59,25 +77,15 @@ class BlobFileAddition {
   std::string DebugJSON() const;
 
  private:
-  BlobFileAddition(uint64_t blob_file_number, uint64_t total_blob_count,
-                   uint64_t total_blob_bytes, std::string checksum_method,
-                   std::string checksum_value)
-      : blob_file_number_(blob_file_number),
-        total_blob_count_(total_blob_count),
-        total_blob_bytes_(total_blob_bytes),
-        checksum_method_(std::move(checksum_method)),
-        checksum_value_(std::move(checksum_value)) {
-    assert(checksum_method_.empty() == checksum_value_.empty());
-  }
   enum CustomFieldTags : uint32_t;
 
   uint64_t blob_file_number_ = kInvalidBlobFileNumber;
   uint64_t total_blob_count_ = 0;
   uint64_t total_blob_bytes_ = 0;
-  int lifetime_label_ = -1;
+  int lifetime_label_ = 0;
   uint64_t lifetime_duration_in_seconds_ = 0;
-  uint64_t build_timestamp_ = 0;
-  uint64_t ending_timestamp_ = 0;
+  uint64_t build_timestamp_ = 1;
+  uint64_t ending_timestamp_ = 1;
   std::string checksum_method_;
   std::string checksum_value_;
   // uint64_t creation_timestamp_ = 0;

@@ -529,10 +529,9 @@ class VersionEdit {
   void AddBlobFile(uint64_t blob_file_number, uint64_t total_blob_count,
                    uint64_t total_blob_bytes, std::string checksum_method,
                    std::string checksum_value) {
-    assert(false);
-    // blob_file_additions_.emplace_back(
-    //     blob_file_number, total_blob_count, total_blob_bytes,
-    //     std::move(checksum_method), std::move(checksum_value));
+    blob_file_additions_.emplace_back(
+        blob_file_number, total_blob_count, total_blob_bytes,
+        std::move(checksum_method), std::move(checksum_value));
   }
 
   using BlobOffsetMap = UnorderedMap<uint64_t, UnorderedMap<std::string, std::string>*>;

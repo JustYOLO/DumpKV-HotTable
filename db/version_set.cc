@@ -4158,9 +4158,10 @@ void VersionStorageInfo::SortBlobFiles() {
 void VersionStorageInfo::AddBlobFileWithLifetimeBucket(std::shared_ptr<BlobFileMetaData> blob_file_meta) {
   assert(blob_file_meta);
   assert(blob_file_meta->GetBlobFileNumber() > 0);
-  assert(blob_file_meta->GetCreationTimestamp() > 0);
   uint64_t lifetime_bucket_idx = blob_file_meta->GetLifetimeLabel();
-  assert(lifetime_bucket_idx < lifetime_blob_files_.size());
+  if (lifetime_bucket_idx >= lifetime_blob_files_.size()) {
+    lifetime_bucket_idx = 0;
+  }
   assert(lifetime_blob_files_[lifetime_bucket_idx].empty() ||
          (lifetime_blob_files_[lifetime_bucket_idx].back() &&
           lifetime_blob_files_[lifetime_bucket_idx].back()->GetBlobFileNumber() <
@@ -6790,7 +6791,8 @@ Status VersionSet::WriteCurrentStateToManifest(
 
         edit.AddBlobFile(blob_file_number, meta->GetTotalBlobCount(),
                          meta->GetTotalBlobBytes(), meta->GetChecksumMethod(),
-                         meta->GetChecksumValue());
+                         meta->GetChecksumValue(), meta->GetLifetimeLabel(),
+                         meta->GetCreationTimestamp(), meta->GetEndingTimestamp());
         if (meta->GetGarbageBlobCount() > 0) {
           edit.AddBlobFileGarbage(blob_file_number, meta->GetGarbageBlobCount(),
                                   meta->GetGarbageBlobBytes());
